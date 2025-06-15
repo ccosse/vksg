@@ -176,7 +176,7 @@ const char* requiredExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
     void mainLoop() {
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
-            //group->traverse();
+            group->traverse();
         }
     }
 

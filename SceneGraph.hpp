@@ -39,6 +39,9 @@ struct Group : Node {
         std::cout << "Group: " << name << "\n";
         for (auto& c : children) c->traverse(ctx);
     }
+    virtual void traverse() {
+        std::cout << "Node traversed\n";
+    }
 };
 
 class SceneGraph {
