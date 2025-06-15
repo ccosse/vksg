@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
+set(CMAKE_BUILD_TYPE Debug)
 project(VkApp)
 include_directories(${CMAKE_BINARY_DIR})
 
@@ -6,7 +7,7 @@ find_package(glfw3 REQUIRED)
 find_package(Vulkan REQUIRED)
 
 add_executable(vksg
-    vksg.cpp
+    #vksg.cpp
     VkApp.cpp
     SceneGraph.cpp
     )

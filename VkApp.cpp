@@ -1,152 +1,204 @@
-#define GLFW_INCLUDE_VULKAN
+//#include "VkApp.hpp"
+#include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
-#include "VkApp.hpp"
 #include <stdexcept>
-#include <array>
+#include <vector>
+#include <iostream>
+#include <cstring>
+#include <memory>
+#include "SceneGraph.hpp"
 
-void VkApp::run() {
-    initWindow();
-    initVulkan();
-    mainLoop();
-    cleanup();
-}
+#define VK_CALL(x) do { \
+    VkResult res = (x); \
+    if (res != VK_SUCCESS) throw std::runtime_error("Vulkan call failed: " #x); \
+} while(0)
 
-void VkApp::initWindow() {
-    glfwInit();
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    window = glfwCreateWindow(800, 600, "VkApp", nullptr, nullptr);
-}
-
-void VkApp::initVulkan() {
-    vkb::InstanceBuilder builder;
-    auto inst_ret = builder.set_app_name("VkApp")
-        .request_validation_layers()
-        .use_default_debug_messenger()
-        .require_api_version(1, 1, 0)
-        .build();
-    if (!inst_ret) throw std::runtime_error("Failed to create instance");
-    vkbInstance = inst_ret.value();
-
-    if (glfwCreateWindowSurface(vkbInstance.instance, window, nullptr, &surface) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create window surface");
-
-    vkb::PhysicalDeviceSelector selector{vkbInstance};
-    auto phys_ret = selector.set_surface(surface).select();
-    auto dev_ret = vkb::DeviceBuilder{phys_ret.value()}.build();
-    if (!dev_ret) throw std::runtime_error("Failed to create device");
-    vkbDevice = dev_ret.value();
-
-    auto swap_ret = vkb::SwapchainBuilder{vkbDevice}
-        .set_old_swapchain({})
-        .set_desired_format({})
-        .build();
-    if (!swap_ret) throw std::runtime_error("Failed to create swapchain");
-    vkbSwapchain = swap_ret.value();
-
-    VkAttachmentDescription colorAttachment{};
-    colorAttachment.format = vkbSwapchain.image_format;
-    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-    VkAttachmentReference colorAttachmentRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &colorAttachmentRef;
-
-    VkRenderPassCreateInfo renderPassInfo{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    renderPassInfo.attachmentCount = 1;
-    renderPassInfo.pAttachments = &colorAttachment;
-    renderPassInfo.subpassCount = 1;
-    renderPassInfo.pSubpasses = &subpass;
-
-    if (vkCreateRenderPass(vkbDevice.device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create render pass");
-
-    auto views = vkbSwapchain.get_image_views().value();
-    for (VkImageView view : views) {
-        VkImageView attachments[] = {view};
-        VkFramebufferCreateInfo fbInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-        fbInfo.renderPass = renderPass;
-        fbInfo.attachmentCount = 1;
-        fbInfo.pAttachments = attachments;
-        fbInfo.width = vkbSwapchain.extent.width;
-        fbInfo.height = vkbSwapchain.extent.height;
-        fbInfo.layers = 1;
-
-        VkFramebuffer fb;
-        if (vkCreateFramebuffer(vkbDevice.device, &fbInfo, nullptr, &fb) != VK_SUCCESS)
-            throw std::runtime_error("Failed to create framebuffer");
-        framebuffers.push_back(fb);
+class VkApp {
+public:
+    void run() {
+        initWindow();
+        initVulkan();
+        mainLoop();
+        cleanup();
     }
 
-    VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-    poolInfo.queueFamilyIndex = vkbDevice.get_queue_index(vkb::QueueType::graphics).value();
-    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    vkCreateCommandPool(vkbDevice.device, &poolInfo, nullptr, &commandPool);
+private:
+    GLFWwindow* window;
+    VkInstance instance;
+    VkSurfaceKHR surface;
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+    VkDevice device;
+    VkQueue graphicsQueue;
+    uint32_t graphicsQueueFamily = UINT32_MAX;
 
-    VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    allocInfo.commandPool = commandPool;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = 1;
-    vkAllocateCommandBuffers(vkbDevice.device, &allocInfo, &commandBuffer);
-}
+    VkSwapchainKHR swapchain;
+    VkFormat swapchainFormat;
+    VkExtent2D swapchainExtent;
+    std::vector<VkImage> swapchainImages;
+    std::vector<VkImageView> imageViews;
+    std::shared_ptr<Group> group; 
 
-void VkApp::mainLoop() {
-    auto queue = vkbDevice.get_queue(vkb::QueueType::graphics).value();
-
-    while (!glfwWindowShouldClose(window)) {
-        glfwPollEvents();
-
-        uint32_t imageIndex;
-        vkAcquireNextImageKHR(vkbDevice.device, vkbSwapchain.swapchain, UINT64_MAX,
-                              VK_NULL_HANDLE, VK_NULL_HANDLE, &imageIndex);
-
-        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        vkBeginCommandBuffer(commandBuffer, &beginInfo);
-
-        VkClearValue clearColor = {{{0.0f, 0.1f, 0.2f, 1.0f}}};
-        VkRenderPassBeginInfo rpInfo{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-        rpInfo.renderPass = renderPass;
-        rpInfo.framebuffer = framebuffers[imageIndex];
-        rpInfo.renderArea.extent = vkbSwapchain.extent;
-        rpInfo.clearValueCount = 1;
-        rpInfo.pClearValues = &clearColor;
-
-        vkCmdBeginRenderPass(commandBuffer, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
-
-        RenderContext ctx{commandBuffer};
-        scene.traverse(ctx);
-
-        vkCmdEndRenderPass(commandBuffer);
-        vkEndCommandBuffer(commandBuffer);
-
-        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffer;
-        vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
-        vkQueueWaitIdle(queue);
-
-        VkPresentInfoKHR presentInfo{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-        presentInfo.swapchainCount = 1;
-        presentInfo.pSwapchains = &vkbSwapchain.swapchain;
-        presentInfo.pImageIndices = &imageIndex;
-        vkQueuePresentKHR(queue, &presentInfo);
+    void initWindow() {
+        glfwInit();
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+        window = glfwCreateWindow(800, 600, "Vulkan Window", nullptr, nullptr);
     }
-}
 
-void VkApp::cleanup() {
-    for (auto fb : framebuffers)
-        vkDestroyFramebuffer(vkbDevice.device, fb, nullptr);
-    vkDestroyRenderPass(vkbDevice.device, renderPass, nullptr);
-    vkDestroyCommandPool(vkbDevice.device, commandPool, nullptr);
-    vkDestroyDevice(vkbDevice.device, nullptr);
-    vkDestroySurfaceKHR(vkbInstance.instance, surface, nullptr);
-    vkDestroyInstance(vkbInstance.instance, nullptr);
-    glfwDestroyWindow(window);
-    glfwTerminate();
+    void initVulkan() {
+        // Instance
+        VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+        appInfo.pApplicationName = "VkApp";
+        appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+        appInfo.pEngineName = "NoEngine";
+        appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+        appInfo.apiVersion = VK_API_VERSION_1_3;
+
+        VkInstanceCreateInfo createInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+        createInfo.pApplicationInfo = &appInfo;
+
+        uint32_t glfwExtCount = 0;
+        const char** glfwExts = glfwGetRequiredInstanceExtensions(&glfwExtCount);
+        createInfo.enabledExtensionCount = glfwExtCount;
+        createInfo.ppEnabledExtensionNames = glfwExts;
+
+        VK_CALL(vkCreateInstance(&createInfo, nullptr, &instance));
+
+        if (!instance) throw std::runtime_error("Instance is null!");
+
+        // Surface
+        if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create window surface");
+        if (!surface) throw std::runtime_error("Surface is null!");
+
+        // Physical Device
+        uint32_t deviceCount = 0;
+        vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+        if (deviceCount == 0) throw std::runtime_error("No Vulkan devices found");
+
+        std::vector<VkPhysicalDevice> devices(deviceCount);
+        vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
+        physicalDevice = devices[0];
+        if (!physicalDevice) throw std::runtime_error("PhysicalDevice is null!");
+
+        // Queue family
+        uint32_t queueCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueCount, nullptr);
+        std::vector<VkQueueFamilyProperties> queueProps(queueCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueCount, queueProps.data());
+
+        for (uint32_t i = 0; i < queueCount; ++i) {
+            if (queueProps[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+                VkBool32 supportsPresent = false;
+                vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, i, surface, &supportsPresent);
+                if (supportsPresent) {
+                    graphicsQueueFamily = i;
+                    break;
+                }
+            }
+        }
+        if (graphicsQueueFamily == UINT32_MAX) throw std::runtime_error("No suitable queue family");
+
+        // Logical device
+        float queuePriority = 1.0f;
+        VkDeviceQueueCreateInfo queueCreate{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+        queueCreate.queueFamilyIndex = graphicsQueueFamily;
+        queueCreate.queueCount = 1;
+        queueCreate.pQueuePriorities = &queuePriority;
+
+        VkDeviceCreateInfo devCreate{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+const char* requiredExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+        devCreate.enabledExtensionCount = 1;
+        devCreate.ppEnabledExtensionNames = requiredExtensions;
+        devCreate.queueCreateInfoCount = 1;
+        devCreate.pQueueCreateInfos = &queueCreate;
+
+        VK_CALL(vkCreateDevice(physicalDevice, &devCreate, nullptr, &device));
+        if (!device) throw std::runtime_error("Device is null!");
+
+        vkGetDeviceQueue(device, graphicsQueueFamily, 0, &graphicsQueue);
+
+        // Swapchain
+        VkSurfaceCapabilitiesKHR surfaceCaps;
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCaps);
+
+        uint32_t formatCount = 0;
+        vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &formatCount, nullptr);
+        std::vector<VkSurfaceFormatKHR> formats(formatCount);
+        vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &formatCount, formats.data());
+
+        VkSurfaceFormatKHR surfaceFormat = formats[0];
+        swapchainFormat = surfaceFormat.format;
+
+        VkSwapchainCreateInfoKHR swapInfo{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+        swapInfo.surface = surface;
+        swapInfo.minImageCount = surfaceCaps.minImageCount;
+        swapInfo.imageFormat = surfaceFormat.format;
+        swapInfo.imageColorSpace = surfaceFormat.colorSpace;
+        swapInfo.imageExtent = surfaceCaps.currentExtent;
+        swapInfo.imageArrayLayers = 1;
+        swapInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        swapInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        swapInfo.preTransform = surfaceCaps.currentTransform;
+        swapInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        swapInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        swapInfo.clipped = VK_TRUE;
+        swapInfo.oldSwapchain = VK_NULL_HANDLE;
+
+        VK_CALL(vkCreateSwapchainKHR(device, &swapInfo, nullptr, &swapchain));
+        swapchainExtent = surfaceCaps.currentExtent;
+
+        uint32_t imageCount = 0;
+        vkGetSwapchainImagesKHR(device, swapchain, &imageCount, nullptr);
+        swapchainImages.resize(imageCount);
+        vkGetSwapchainImagesKHR(device, swapchain, &imageCount, swapchainImages.data());
+
+        imageViews.resize(imageCount);
+        for (size_t i = 0; i < imageCount; ++i) {
+            VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            viewInfo.image = swapchainImages[i];
+            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewInfo.format = swapchainFormat;
+            viewInfo.components = {
+                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY
+            };
+            viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            viewInfo.subresourceRange.levelCount = 1;
+            viewInfo.subresourceRange.layerCount = 1;
+
+            VK_CALL(vkCreateImageView(device, &viewInfo, nullptr, &imageViews[i]));
+        }
+        group = std::make_shared<Group>("root");
+        group->add(std::make_shared<Geometry>("cube"));
+
+    }
+
+    void mainLoop() {
+        while (!glfwWindowShouldClose(window)) {
+            glfwPollEvents();
+            //group->traverse();
+        }
+    }
+
+    void cleanup() {
+        for (auto view : imageViews)
+            vkDestroyImageView(device, view, nullptr);
+        vkDestroySwapchainKHR(device, swapchain, nullptr);
+        vkDestroyDevice(device, nullptr);
+        vkDestroySurfaceKHR(instance, surface, nullptr);
+        vkDestroyInstance(instance, nullptr);
+        glfwDestroyWindow(window);
+        glfwTerminate();
+    }
+};
+
+int main() {
+    VkApp app;
+    try {
+        app.run();
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << std::endl;
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
 }

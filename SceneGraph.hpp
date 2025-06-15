@@ -22,6 +22,13 @@ struct Drawable : Node {
         std::cout << "Drawing: " << name << "\n";
     }
 };
+struct Geometry : public Node {
+    std::string name;
+    Geometry(const std::string& n) : name(n) {}
+    void traverse(RenderContext& ctx) override {
+        std::cout << "Drawing: " << name << std::endl;
+    }
+};
 
 struct Group : Node {
     std::string name;
